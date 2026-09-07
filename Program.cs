@@ -96,6 +96,7 @@ namespace BossKey
             hideService.UpdateTargets(config.TargetExePaths);
             hideService.RestoreLeftovers();
             hideService.HideLeakedHelpers();
+            hideService.ClearTargetTopmost();
 
             var windowFx = new WindowFx();
             windowFx.RepairDamagedSurfaces();

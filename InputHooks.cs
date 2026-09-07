@@ -18,7 +18,8 @@ namespace BossKey
         private readonly HideService _hideService;
         private readonly Func<bool> _isSettingsVisible;
         private readonly System.Windows.Forms.Timer _pollTimer;
-        private readonly Thread _hookThread;
+        private readonly object _hookLock = new object();
+        private Thread _hookThread;
         private IntPtr _mouseHook = IntPtr.Zero;
         private IntPtr _keyboardHook = IntPtr.Zero;
         private WinApi.LowLevelMouseProc _mouseProc;
@@ -38,6 +39,7 @@ namespace BossKey
         private volatile bool _hookThreadStop;
         private int _hookThreadId;
         private IntPtr _hookPumpWnd = IntPtr.Zero;
+        private int _pollTicks;
 
         public event Action HideRequested;
         public event Action ShowRequested;
@@ -62,11 +64,7 @@ namespace BossKey
             _pollTimer.Tick += OnPollTick;
             _pollTimer.Start();
 
-            _hookThread = new Thread(HookThreadMain);
-            _hookThread.Name = "BossKeyHooks";
-            _hookThread.IsBackground = true;
-            _hookThread.SetApartmentState(ApartmentState.STA);
-            _hookThread.Start();
+            StartHookThread();
         }
 
         public void ApplyConfig(AppConfig config)
@@ -127,12 +125,56 @@ namespace BossKey
             WinApi.UnregisterHotKey(_messageWindow.Handle, HotkeySettingsId);
         }
 
+        private void StartHookThread()
+        {
+            if (_hookThreadStop)
+            {
+                return;
+            }
+
+            if (_hookThread != null && _hookThread.IsAlive)
+            {
+                return;
+            }
+
+            _hookThread = new Thread(HookThreadMain);
+            _hookThread.Name = "BossKeyHooks";
+            _hookThread.IsBackground = true;
+            _hookThread.SetApartmentState(ApartmentState.STA);
+            _hookThread.Start();
+        }
+
         private void HookThreadMain()
         {
             _hookThreadId = WinApi.GetCurrentThreadId();
             _keyboardProc = KeyboardHookCallback;
             _mouseProc = MouseHookCallback;
 
+            while (!_hookThreadStop)
+            {
+                try
+                {
+                    RunHookLoop();
+                }
+                catch
+                {
+                }
+
+                lock (_hookLock)
+                {
+                    RemoveMouseHook();
+                    RemoveKeyboardHook();
+                }
+
+                if (!_hookThreadStop)
+                {
+                    Thread.Sleep(400);
+                }
+            }
+        }
+
+        private void RunHookLoop()
+        {
             _hookPumpWnd = WinApi.CreateWindowEx(
                 0,
                 "STATIC",
@@ -147,11 +189,15 @@ namespace BossKey
                 IntPtr.Zero,
                 IntPtr.Zero);
 
-            InstallKeyboardHook();
-            InstallMouseHook();
+            lock (_hookLock)
+            {
+                InstallKeyboardHook();
+                InstallMouseHook();
+            }
+
             if (_hookPumpWnd != IntPtr.Zero)
             {
-                WinApi.SetTimer(_hookPumpWnd, new UIntPtr(1), 180, IntPtr.Zero);
+                WinApi.SetTimer(_hookPumpWnd, new UIntPtr(1), 2500, IntPtr.Zero);
                 _rawInput.AttachHandle(_hookPumpWnd, _config);
             }
 
@@ -160,7 +206,10 @@ namespace BossKey
             {
                 if (msg.message == WinApi.WM_TIMER)
                 {
-                    ReinstallKeyboardHook();
+                    lock (_hookLock)
+                    {
+                        ReinstallHooks();
+                    }
                 }
                 else if (msg.message == WinApi.WM_INPUT)
                 {
@@ -178,14 +227,19 @@ namespace BossKey
                 _hookPumpWnd = IntPtr.Zero;
             }
 
-            RemoveMouseHook();
-            RemoveKeyboardHook();
+            lock (_hookLock)
+            {
+                RemoveMouseHook();
+                RemoveKeyboardHook();
+            }
         }
 
-        private void ReinstallKeyboardHook()
+        private void ReinstallHooks()
         {
+            RemoveMouseHook();
             RemoveKeyboardHook();
             InstallKeyboardHook();
+            InstallMouseHook();
         }
 
         private void InstallMouseHook()
@@ -195,11 +249,20 @@ namespace BossKey
                 return;
             }
 
+            var module = WinApi.GetModuleHandle(null);
             _mouseHook = WinApi.SetWindowsHookEx(
                 WinApi.WH_MOUSE_LL,
                 _mouseProc,
-                IntPtr.Zero,
+                module,
                 0);
+            if (_mouseHook == IntPtr.Zero)
+            {
+                _mouseHook = WinApi.SetWindowsHookEx(
+                    WinApi.WH_MOUSE_LL,
+                    _mouseProc,
+                    IntPtr.Zero,
+                    0);
+            }
         }
 
         private void RemoveMouseHook()
@@ -220,11 +283,20 @@ namespace BossKey
                 return;
             }
 
+            var module = WinApi.GetModuleHandle(null);
             _keyboardHook = WinApi.SetWindowsHookEx(
                 WinApi.WH_KEYBOARD_LL,
                 _keyboardProc,
-                IntPtr.Zero,
+                module,
                 0);
+            if (_keyboardHook == IntPtr.Zero)
+            {
+                _keyboardHook = WinApi.SetWindowsHookEx(
+                    WinApi.WH_KEYBOARD_LL,
+                    _keyboardProc,
+                    IntPtr.Zero,
+                    0);
+            }
         }
 
         private void RemoveKeyboardHook()
@@ -311,50 +383,56 @@ namespace BossKey
 
         private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0)
+            try
             {
-                var message = wParam.ToInt32();
-                if (message == WinApi.WM_KEYDOWN || message == WinApi.WM_SYSKEYDOWN)
+                if (nCode >= 0)
                 {
-                    var info = (WinApi.KBDLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
-                        lParam,
-                        typeof(WinApi.KBDLLHOOKSTRUCT));
-                    if (MatchesHotkey(_config.HideHotkey, info.vkCode))
+                    var message = wParam.ToInt32();
+                    if (message == WinApi.WM_KEYDOWN || message == WinApi.WM_SYSKEYDOWN)
                     {
-                        PostHide();
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.ShowHotkey, info.vkCode))
-                    {
-                        PostShow();
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.TopmostHotkey, info.vkCode))
-                    {
-                        PostAction(TopmostRequested);
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.OpacityDownHotkey, info.vkCode))
-                    {
-                        PostAction(OpacityDownRequested);
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.OpacityUpHotkey, info.vkCode))
-                    {
-                        PostAction(OpacityUpRequested);
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.OpacityRestoreHotkey, info.vkCode))
-                    {
-                        PostAction(OpacityRestoreRequested);
-                        return (IntPtr)1;
-                    }
-                    if (MatchesHotkey(_config.SettingsHotkey, info.vkCode))
-                    {
-                        PostAction(SettingsRequested);
-                        return (IntPtr)1;
+                        var info = (WinApi.KBDLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                            lParam,
+                            typeof(WinApi.KBDLLHOOKSTRUCT));
+                        if (MatchesHotkey(_config.HideHotkey, info.vkCode))
+                        {
+                            PostHide();
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.ShowHotkey, info.vkCode))
+                        {
+                            PostShow();
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.TopmostHotkey, info.vkCode))
+                        {
+                            PostAction(TopmostRequested);
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.OpacityDownHotkey, info.vkCode))
+                        {
+                            PostAction(OpacityDownRequested);
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.OpacityUpHotkey, info.vkCode))
+                        {
+                            PostAction(OpacityUpRequested);
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.OpacityRestoreHotkey, info.vkCode))
+                        {
+                            PostAction(OpacityRestoreRequested);
+                            return (IntPtr)1;
+                        }
+                        if (MatchesHotkey(_config.SettingsHotkey, info.vkCode))
+                        {
+                            PostAction(SettingsRequested);
+                            return (IntPtr)1;
+                        }
                     }
                 }
+            }
+            catch
+            {
             }
 
             return WinApi.CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
@@ -362,60 +440,66 @@ namespace BossKey
 
         private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0)
+            try
             {
-                var message = wParam.ToInt32();
-                var ctrlAlt = IsCtrlDown() && IsAltDown();
-                if (ctrlAlt && message == WinApi.WM_MOUSEWHEEL)
+                if (nCode >= 0)
                 {
-                    var hookStruct = (WinApi.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
-                        lParam,
-                        typeof(WinApi.MSLLHOOKSTRUCT));
-                    var delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
-                    if (delta < 0)
-                    {
-                        PostAction(OpacityDownRequested);
-                    }
-                    else if (delta > 0)
-                    {
-                        PostAction(OpacityUpRequested);
-                    }
-
-                    return (IntPtr)1;
-                }
-
-                if (ctrlAlt && message == WinApi.WM_MBUTTONDOWN)
-                {
-                    PostAction(TopmostRequested);
-                    return (IntPtr)1;
-                }
-
-                if (!ShouldIgnoreMouseHide())
-                {
-                    if (message == WinApi.WM_MBUTTONDOWN && _config.MouseMiddle)
-                    {
-                        PostHide();
-                        return (IntPtr)1;
-                    }
-
-                    if (message == WinApi.WM_XBUTTONDOWN)
+                    var message = wParam.ToInt32();
+                    var ctrlAlt = IsCtrlDown() && IsAltDown();
+                    if (ctrlAlt && message == WinApi.WM_MOUSEWHEEL)
                     {
                         var hookStruct = (WinApi.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
                             lParam,
                             typeof(WinApi.MSLLHOOKSTRUCT));
-                        var button = hookStruct.mouseData >> 16;
-                        if (_config.MouseX1 && button == WinApi.XBUTTON1)
+                        var delta = (short)((hookStruct.mouseData >> 16) & 0xFFFF);
+                        if (delta < 0)
+                        {
+                            PostAction(OpacityDownRequested);
+                        }
+                        else if (delta > 0)
+                        {
+                            PostAction(OpacityUpRequested);
+                        }
+
+                        return (IntPtr)1;
+                    }
+
+                    if (ctrlAlt && message == WinApi.WM_MBUTTONDOWN)
+                    {
+                        PostAction(TopmostRequested);
+                        return (IntPtr)1;
+                    }
+
+                    if (!ShouldIgnoreMouseHide())
+                    {
+                        if (message == WinApi.WM_MBUTTONDOWN && _config.MouseMiddle)
                         {
                             PostHide();
                             return (IntPtr)1;
                         }
-                        if (_config.MouseX2 && button == WinApi.XBUTTON2)
+
+                        if (message == WinApi.WM_XBUTTONDOWN)
                         {
-                            PostHide();
-                            return (IntPtr)1;
+                            var hookStruct = (WinApi.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
+                                lParam,
+                                typeof(WinApi.MSLLHOOKSTRUCT));
+                            var button = hookStruct.mouseData >> 16;
+                            if (_config.MouseX1 && button == WinApi.XBUTTON1)
+                            {
+                                PostHide();
+                                return (IntPtr)1;
+                            }
+                            if (_config.MouseX2 && button == WinApi.XBUTTON2)
+                            {
+                                PostHide();
+                                return (IntPtr)1;
+                            }
                         }
                     }
                 }
+            }
+            catch
+            {
             }
 
             return WinApi.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
@@ -423,6 +507,22 @@ namespace BossKey
 
         private void OnPollTick(object sender, EventArgs e)
         {
+            try
+            {
+                _pollTicks++;
+                if ((_pollTicks % 100) == 0)
+                {
+                    StartHookThread();
+                }
+
+                if ((_pollTicks % 1000) == 0)
+                {
+                    Rebind();
+                }
+            }
+            catch
+            {
+            }
             PollHotkey(_config.HideHotkey, ref _hideHeld, new Action(PostHide));
             PollHotkey(_config.ShowHotkey, ref _showHeld, new Action(PostShow));
             PollHotkey(_config.TopmostHotkey, ref _topmostHeld, new Action(delegate { PostAction(TopmostRequested); }));
@@ -639,8 +739,11 @@ namespace BossKey
 
             _rawInput.Dispose();
             UnregisterHotkeys();
-            RemoveMouseHook();
-            RemoveKeyboardHook();
+            lock (_hookLock)
+            {
+                RemoveMouseHook();
+                RemoveKeyboardHook();
+            }
         }
     }
 

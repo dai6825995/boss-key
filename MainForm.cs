@@ -682,6 +682,7 @@ namespace BossKey
             BringToFront();
             WinApi.SetForegroundWindow(Handle);
             Activate();
+            BeginInvoke(new Action(delegate { TopMost = false; }));
         }
 
         public void ShowFromTray()

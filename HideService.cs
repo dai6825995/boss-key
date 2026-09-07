@@ -135,6 +135,7 @@ namespace BossKey
                 if (IsMainAppWindow(hwnd) && IsCloaked(hwnd))
                 {
                     CloakWindow(hwnd, false);
+                    ClearTopmost(hwnd);
                     ForceRepaint(hwnd);
                 }
             }
@@ -555,7 +556,8 @@ namespace BossKey
             CloakWindow(state.Handle, false);
             if (!state.SkipExStyle)
             {
-                WinApi.SetWindowLongPtr(state.Handle, WinApi.GWL_EXSTYLE, new IntPtr(state.ExStyle));
+                var restored = state.ExStyle & ~WinApi.WS_EX_TOPMOST;
+                WinApi.SetWindowLongPtr(state.Handle, WinApi.GWL_EXSTYLE, new IntPtr(restored));
                 WinApi.SetWindowPos(
                     state.Handle,
                     IntPtr.Zero,
@@ -565,6 +567,8 @@ namespace BossKey
                     0,
                     WinApi.SWP_NOMOVE | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_FRAMECHANGED | WinApi.SWP_NOACTIVATE);
             }
+
+            ClearTopmost(state.Handle);
 
             TaskbarHelper.ShowTab(state.Handle);
 
@@ -614,6 +618,40 @@ namespace BossKey
             }
 
             ForceRepaint(hwnd);
+        }
+
+        private static void ClearTopmost(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !WinApi.IsWindow(hwnd))
+            {
+                return;
+            }
+
+            var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
+            if ((exStyle & WinApi.WS_EX_TOPMOST) != 0)
+            {
+                WinApi.SetWindowLongPtr(hwnd, WinApi.GWL_EXSTYLE, new IntPtr(exStyle & ~WinApi.WS_EX_TOPMOST));
+            }
+
+            WinApi.SetWindowPos(
+                hwnd,
+                WinApi.HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                WinApi.SWP_NOMOVE | WinApi.SWP_NOSIZE | WinApi.SWP_NOACTIVATE);
+        }
+
+        public void ClearTargetTopmost()
+        {
+            foreach (var hwnd in EnumerateTargetWindows(true))
+            {
+                if (IsMainAppWindow(hwnd))
+                {
+                    ClearTopmost(hwnd);
+                }
+            }
         }
 
         private static void ForceRepaint(IntPtr hwnd)
