@@ -49,10 +49,30 @@ namespace BossKey
 
         public string AdjustOpacity(int delta)
         {
-            var windows = GetTargetWindows();
-            if (windows.Count == 0)
+            var hwnd = GetTargetWindow();
+            if (hwnd == IntPtr.Zero)
             {
                 return "没有可操作的窗口";
+            }
+
+            uint processId;
+            WinApi.GetWindowThreadProcessId(hwnd, out processId);
+            var exe = GetProcessName(processId);
+            if (IsUuFamily(exe))
+            {
+                return "UU远程不支持外部调透明度";
+            }
+
+            if (ShouldSkipOpacity(hwnd, exe))
+            {
+                return "当前窗口不支持透明度";
+            }
+
+            var windows = new List<IntPtr>();
+            AddUnique(windows, hwnd);
+            if (IsCameraApp(exe))
+            {
+                CollectLargeChildren(hwnd, processId, windows);
             }
 
             byte current = 255;
@@ -75,26 +95,11 @@ namespace BossKey
                 next = 255;
             }
 
-            var applied = 0;
             for (var i = 0; i < windows.Count; i++)
             {
-                var hwnd = windows[i];
-                uint processId;
-                WinApi.GetWindowThreadProcessId(hwnd, out processId);
-                if (ShouldSkipOpacity(hwnd, GetProcessName(processId)))
-                {
-                    continue;
-                }
-
-                var state = EnsureState(hwnd);
-                ApplyAlpha(hwnd, state, (byte)next);
+                var state = EnsureState(windows[i]);
+                ApplyAlpha(windows[i], state, (byte)next);
                 state.CurrentAlpha = (byte)next;
-                applied++;
-            }
-
-            if (applied == 0)
-            {
-                return "当前窗口不支持透明度";
             }
 
             return "透明度 " + (int)Math.Round((255 - next) * 100.0 / 255.0) + "%";
@@ -102,15 +107,21 @@ namespace BossKey
 
         public string RestoreOpacity()
         {
-            var windows = GetTargetWindows();
-            if (windows.Count == 0)
+            var hwnd = GetTargetWindow();
+            if (hwnd == IntPtr.Zero)
             {
                 return "没有可操作的窗口";
             }
 
-            for (var i = 0; i < windows.Count; i++)
+            uint processId;
+            WinApi.GetWindowThreadProcessId(hwnd, out processId);
+            RestoreOpacity(hwnd);
+            CollectLargeChildren(hwnd, processId, new List<IntPtr>());
+            var children = new List<IntPtr>();
+            CollectLargeChildren(hwnd, processId, children);
+            for (var i = 0; i < children.Count; i++)
             {
-                RestoreOpacity(windows[i]);
+                RestoreOpacity(children[i]);
             }
 
             return "已恢复当前窗口透明度";
@@ -125,6 +136,7 @@ namespace BossKey
             }
             _states.Clear();
             RepairDamagedSurfaces();
+            ClearUuOpacity();
         }
 
         public void RepairDamagedSurfaces()
@@ -139,7 +151,7 @@ namespace BossKey
                 uint processId;
                 WinApi.GetWindowThreadProcessId(hwnd, out processId);
                 var exe = GetProcessName(processId);
-                if (ShouldSkipOpacity(hwnd, exe))
+                if (ShouldSkipOpacity(hwnd, exe) && !IsUuFamily(exe))
                 {
                     RepairOneSurface(hwnd);
                     WinApi.EnumChildWindows(hwnd, (child, lp) =>
@@ -151,6 +163,43 @@ namespace BossKey
 
                 return true;
             }, IntPtr.Zero);
+        }
+
+        public void ClearUuOpacity()
+        {
+            WinApi.EnumWindows((hwnd, lParam) =>
+            {
+                uint processId;
+                WinApi.GetWindowThreadProcessId(hwnd, out processId);
+                if (!IsUuFamily(GetProcessName(processId)))
+                {
+                    return true;
+                }
+
+                ResetGpuOpacity(hwnd);
+                WinApi.EnumChildWindows(hwnd, (child, lp) =>
+                {
+                    ResetGpuOpacity(child);
+                    return true;
+                }, IntPtr.Zero);
+                return true;
+            }, IntPtr.Zero);
+        }
+
+        private static void ResetGpuOpacity(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !WinApi.IsWindow(hwnd))
+            {
+                return;
+            }
+
+            var dummy = new WindowFxState();
+            ApplyComposition(hwnd, dummy, 255);
+            var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
+            if ((exStyle & WinApi.WS_EX_LAYERED) != 0)
+            {
+                WinApi.SetLayeredWindowAttributes(hwnd, 0, 255, WinApi.LWA_ALPHA);
+            }
         }
 
         private void RestoreOpacity(IntPtr hwnd)
@@ -249,19 +298,27 @@ namespace BossKey
             }
 
             var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
-            var noRedirect = (exStyle & WinApi.WS_EX_NOREDIRECTIONBITMAP) != 0;
-            var uu = IsUuFamily(exe);
-
-            if (noRedirect)
+            if ((exStyle & WinApi.WS_EX_NOREDIRECTIONBITMAP) != 0)
             {
-                ApplyComposition(hwnd, state, alpha);
                 return;
             }
 
-            EnsureLayered(hwnd, state, !uu);
+            EnsureLayered(hwnd, state);
             WinApi.SetLayeredWindowAttributes(hwnd, 0, alpha, WinApi.LWA_ALPHA);
-            if (!uu)
+
+            if (alpha >= 255 && state.UsedComposition)
             {
+                ApplyComposition(hwnd, state, 255);
+            }
+        }
+
+        private static void EnsureLayered(IntPtr hwnd, WindowFxState state)
+        {
+            var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
+            if ((exStyle & WinApi.WS_EX_LAYERED) == 0)
+            {
+                WinApi.SetWindowLongPtr(hwnd, WinApi.GWL_EXSTYLE, new IntPtr(exStyle | WinApi.WS_EX_LAYERED));
+                state.AddedLayered = true;
                 WinApi.SetWindowPos(
                     hwnd,
                     IntPtr.Zero,
@@ -271,38 +328,6 @@ namespace BossKey
                     0,
                     WinApi.SWP_NOMOVE | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_FRAMECHANGED | WinApi.SWP_NOACTIVATE);
             }
-
-            if (uu)
-            {
-                ApplyComposition(hwnd, state, alpha);
-            }
-            else if (alpha >= 255 && state.UsedComposition)
-            {
-                ApplyComposition(hwnd, state, 255);
-            }
-        }
-
-        private static void EnsureLayered(IntPtr hwnd, WindowFxState state, bool frameChanged)
-        {
-            var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
-            if ((exStyle & WinApi.WS_EX_LAYERED) == 0)
-            {
-                WinApi.SetWindowLongPtr(hwnd, WinApi.GWL_EXSTYLE, new IntPtr(exStyle | WinApi.WS_EX_LAYERED));
-                state.AddedLayered = true;
-                if (frameChanged)
-                {
-                    WinApi.SetWindowPos(
-                        hwnd,
-                        IntPtr.Zero,
-                        0,
-                        0,
-                        0,
-                        0,
-                        WinApi.SWP_NOMOVE | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_FRAMECHANGED | WinApi.SWP_NOACTIVATE);
-                }
-            }
-
-            WinApi.SetLayeredWindowAttributes(hwnd, 0, 255, WinApi.LWA_ALPHA);
         }
 
         private static void ApplyComposition(IntPtr hwnd, WindowFxState state, byte alpha)
@@ -390,48 +415,6 @@ namespace BossKey
             ApplyComposition(hwnd, dummy, 255);
         }
 
-        private List<IntPtr> GetTargetWindows()
-        {
-            var seed = GetTargetWindow();
-            var result = new List<IntPtr>();
-            if (seed == IntPtr.Zero)
-            {
-                return result;
-            }
-
-            uint processId;
-            WinApi.GetWindowThreadProcessId(seed, out processId);
-            var exe = GetProcessName(processId);
-            if (ShouldSkipOpacity(seed, exe))
-            {
-                return result;
-            }
-
-            WinApi.EnumWindows((hwnd, lParam) =>
-            {
-                uint pid;
-                WinApi.GetWindowThreadProcessId(hwnd, out pid);
-                if (pid != processId || !WinApi.IsWindowVisible(hwnd) || !IsAdjustableWindow(hwnd))
-                {
-                    return true;
-                }
-
-                if (IsSizableWindow(hwnd))
-                {
-                    AddUnique(result, hwnd);
-                }
-
-                return true;
-            }, IntPtr.Zero);
-
-            if (result.Count == 0)
-            {
-                result.Add(seed);
-            }
-
-            return result;
-        }
-
         private IntPtr GetTargetWindow()
         {
             var hwnd = GetWindowUnderCursor();
@@ -485,6 +468,42 @@ namespace BossKey
             }
         }
 
+        private static void CollectLargeChildren(IntPtr parent, uint processId, List<IntPtr> result)
+        {
+            WinApi.RECT parentRect;
+            if (!WinApi.GetWindowRect(parent, out parentRect))
+            {
+                return;
+            }
+
+            var parentW = parentRect.Right - parentRect.Left;
+            var parentH = parentRect.Bottom - parentRect.Top;
+            WinApi.EnumChildWindows(parent, (hwnd, lParam) =>
+            {
+                uint pid;
+                WinApi.GetWindowThreadProcessId(hwnd, out pid);
+                if (pid != processId || !IsSizableWindow(hwnd))
+                {
+                    return true;
+                }
+
+                WinApi.RECT rect;
+                if (!WinApi.GetWindowRect(hwnd, out rect))
+                {
+                    return true;
+                }
+
+                var width = rect.Right - rect.Left;
+                var height = rect.Bottom - rect.Top;
+                if (width >= parentW / 2 && height >= parentH * 2 / 5)
+                {
+                    AddUnique(result, hwnd);
+                }
+
+                return true;
+            }, IntPtr.Zero);
+        }
+
         private static bool IsUuFamily(string exeName)
         {
             if (string.IsNullOrEmpty(exeName))
@@ -494,32 +513,34 @@ namespace BossKey
 
             return string.Equals(exeName, "gameviewer.exe", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(exeName, "uu.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(exeName, "gameviewerserver.exe", StringComparison.OrdinalIgnoreCase)
                 || exeName.IndexOf("gameviewer", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool ShouldSkipOpacity(IntPtr hwnd, string exeName)
         {
-            if (IsFragileGpuApp(hwnd, exeName))
+            if (IsCameraApp(exeName))
+            {
+                return false;
+            }
+
+            if (IsUuFamily(exeName) || IsFragileGpuApp(exeName))
             {
                 return true;
             }
 
             var exStyle = WinApi.GetWindowLongInt(hwnd, WinApi.GWL_EXSTYLE);
-            if ((exStyle & WinApi.WS_EX_NOREDIRECTIONBITMAP) != 0 && !IsUuFamily(exeName))
-            {
-                return true;
-            }
-
-            return false;
+            return (exStyle & WinApi.WS_EX_NOREDIRECTIONBITMAP) != 0;
         }
 
-        private static bool IsFragileGpuApp(IntPtr hwnd, string exeName)
+        private static bool IsCameraApp(string exeName)
         {
-            if (IsChromeClass(hwnd))
-            {
-                return true;
-            }
+            return !string.IsNullOrEmpty(exeName)
+                && exeName.IndexOf("摄像头", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
 
+        private static bool IsFragileGpuApp(string exeName)
+        {
             if (string.IsNullOrEmpty(exeName))
             {
                 return false;
@@ -529,18 +550,7 @@ namespace BossKey
                 || string.Equals(exeName, "Code.exe", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(exeName, "chrome.exe", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(exeName, "msedge.exe", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(exeName, "devenv.exe", StringComparison.OrdinalIgnoreCase)
-                || exeName.IndexOf("摄像头", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static bool IsChromeClass(IntPtr hwnd)
-        {
-            var className = new StringBuilder(256);
-            WinApi.GetClassName(hwnd, className, className.Capacity);
-            var name = className.ToString();
-            return name.IndexOf("Chrome_", StringComparison.OrdinalIgnoreCase) >= 0
-                || name.IndexOf("CEF", StringComparison.OrdinalIgnoreCase) >= 0
-                || name.IndexOf("Electron", StringComparison.OrdinalIgnoreCase) >= 0;
+                || string.Equals(exeName, "devenv.exe", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string GetProcessName(uint processId)

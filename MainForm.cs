@@ -252,7 +252,7 @@ namespace BossKey
             };
 
             card.Controls.Add(MakeMuted("全局快捷键", new Point(16, 12)));
-            card.Controls.Add(MakeHint("鼠标对准窗口，按住 Ctrl+Alt 滚轮调透明度（同无忧隐藏）。点中键可置顶。", new Point(110, 14)));
+            card.Controls.Add(MakeHint("鼠标对准窗口，按住 Ctrl+Alt 滚轮调透明度。UU 远程画面除外。点中键可置顶。", new Point(110, 14)));
 
             AddHotkeyRow(card, "隐藏软件", "hideHotkey", 40);
             AddHotkeyRow(card, "显示软件", "showHotkey", 72);

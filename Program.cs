@@ -99,6 +99,7 @@ namespace BossKey
 
             var windowFx = new WindowFx();
             windowFx.RepairDamagedSurfaces();
+            windowFx.ClearUuOpacity();
             var pump = new PumpForm();
             var mainForm = new MainForm(hideService, windowFx, config);
             var inputHooks = new InputHooks(pump, hideService, () => mainForm.IsVisibleToUser());
