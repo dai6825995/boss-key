@@ -183,6 +183,9 @@ namespace BossKey
         public static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+        [DllImport("user32.dll")]
         public static extern IntPtr GetShellWindow();
 
         [DllImport("user32.dll")]

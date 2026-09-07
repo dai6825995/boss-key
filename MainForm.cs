@@ -640,6 +640,7 @@ namespace BossKey
             {
                 e.Cancel = true;
                 _allowVisible = false;
+                TopMost = false;
                 ShowInTaskbar = false;
                 Hide();
             }
@@ -647,9 +648,16 @@ namespace BossKey
 
         public void ToggleSettings()
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(ToggleSettings));
+                return;
+            }
+
             if (IsVisibleToUser())
             {
                 _allowVisible = false;
+                TopMost = false;
                 ShowInTaskbar = false;
                 Hide();
                 return;
@@ -660,10 +668,19 @@ namespace BossKey
 
         public void ShowSettings()
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(ShowSettings));
+                return;
+            }
+
             _allowVisible = true;
             ShowInTaskbar = false;
-            Show();
             WindowState = FormWindowState.Normal;
+            TopMost = true;
+            Show();
+            BringToFront();
+            WinApi.SetForegroundWindow(Handle);
             Activate();
         }
 
@@ -746,7 +763,7 @@ namespace BossKey
 
                 if (enabled)
                 {
-                    key.SetValue(ValueName, Application.ExecutablePath);
+                    key.SetValue(ValueName, "\"" + Application.ExecutablePath + "\" --silent");
                 }
                 else
                 {

@@ -59,40 +59,37 @@ namespace BossKey
             _mutex = new Mutex(true, "Global\\BossKey_SingleInstance", out createdNew);
             if (!createdNew)
             {
-                var existing = WinApi.FindWindow(null, PumpForm.WindowTitle);
-                if (existing == IntPtr.Zero)
+                if (NotifyExistingInstance())
                 {
-                    try
-                    {
-                        var hwndPath = Path.Combine(
-                            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                            "boss-key",
-                            "hwnd.txt");
-                        long raw;
-                        if (File.Exists(hwndPath) && long.TryParse(File.ReadAllText(hwndPath).Trim(), out raw) && raw != 0)
-                        {
-                            existing = new IntPtr(raw);
-                        }
-                    }
-                    catch
-                    {
-                    }
+                    return;
                 }
 
-                if (existing != IntPtr.Zero)
+                try
                 {
-                    WinApi.PostMessage(existing, ShowSettingsMessage, IntPtr.Zero, IntPtr.Zero);
+                    if (!_mutex.WaitOne(1500))
+                    {
+                        NotifyExistingInstance();
+                        return;
+                    }
                 }
-                return;
+                catch (AbandonedMutexException)
+                {
+                }
             }
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            var silent = HasSilentArg();
             var config = ConfigStore.Load();
             if (config.TargetExePaths == null)
             {
                 config.TargetExePaths = new List<string>();
+            }
+
+            if (config.RunAtStartup)
+            {
+                StartupHelper.SetEnabled(true);
             }
 
             var hideService = new HideService();
@@ -107,7 +104,7 @@ namespace BossKey
             var inputHooks = new InputHooks(pump, hideService, () => mainForm.IsVisibleToUser());
             mainForm.AttachInputHooks(inputHooks);
             pump.Hooks = inputHooks;
-            pump.ShowSettings = mainForm.ToggleSettings;
+            pump.ShowSettings = mainForm.ShowSettings;
 
             inputHooks.HideRequested += hideService.HideAll;
             inputHooks.ShowRequested += hideService.ShowAll;
@@ -117,8 +114,72 @@ namespace BossKey
             inputHooks.OpacityRestoreRequested += () => mainForm.SetStatus(windowFx.RestoreOpacity());
             inputHooks.SettingsRequested += mainForm.ToggleSettings;
 
-            var context = new AppContext(pump, mainForm, hideService, inputHooks, windowFx);
+            var context = new AppContext(pump, mainForm, hideService, inputHooks, windowFx, !silent);
             Application.Run(context);
+        }
+
+        private static bool HasSilentArg()
+        {
+            var args = Environment.GetCommandLineArgs();
+            for (var i = 1; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], "--silent", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(args[i], "/silent", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool NotifyExistingInstance()
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                var existing = FindPumpWindow();
+                if (existing != IntPtr.Zero && WinApi.IsWindow(existing))
+                {
+                    WinApi.AllowSetForegroundWindow(-1);
+                    WinApi.PostMessage(existing, ShowSettingsMessage, IntPtr.Zero, IntPtr.Zero);
+                    return true;
+                }
+
+                Thread.Sleep(50);
+            }
+
+            return false;
+        }
+
+        private static IntPtr FindPumpWindow()
+        {
+            var existing = WinApi.FindWindow(null, PumpForm.WindowTitle);
+            if (existing != IntPtr.Zero && WinApi.IsWindow(existing))
+            {
+                return existing;
+            }
+
+            try
+            {
+                var hwndPath = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "boss-key",
+                    "hwnd.txt");
+                long raw;
+                if (File.Exists(hwndPath) && long.TryParse(File.ReadAllText(hwndPath).Trim(), out raw) && raw != 0)
+                {
+                    existing = new IntPtr(raw);
+                    if (WinApi.IsWindow(existing))
+                    {
+                        return existing;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return IntPtr.Zero;
         }
     }
 
@@ -202,7 +263,7 @@ namespace BossKey
         private readonly MainForm _mainForm;
         private bool _exiting;
 
-        public AppContext(PumpForm pump, MainForm mainForm, HideService hideService, InputHooks inputHooks, WindowFx windowFx)
+        public AppContext(PumpForm pump, MainForm mainForm, HideService hideService, InputHooks inputHooks, WindowFx windowFx, bool showSettingsOnStart)
         {
             _mainForm = mainForm;
             _hideService = hideService;
@@ -210,6 +271,10 @@ namespace BossKey
             _windowFx = windowFx;
             MainForm = pump;
             _mainForm.ExitRequested += ExitApplication;
+            if (showSettingsOnStart)
+            {
+                pump.Shown += (s, e) => _mainForm.ShowSettings();
+            }
         }
 
         private void ExitApplication()
