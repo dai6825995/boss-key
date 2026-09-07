@@ -31,6 +31,8 @@ namespace BossKey
             InputHooks inputHooks = null;
 
             mainForm = new MainForm(hideService, config);
+            mainForm.ShowInTaskbar = false;
+            mainForm.CreateHandle();
             inputHooks = new InputHooks(mainForm, hideService, () => mainForm.IsVisibleToUser());
             mainForm.AttachInputHooks(inputHooks);
             inputHooks.HideRequested += hideService.HideAll;
