@@ -39,6 +39,11 @@ namespace BossKey
             MouseX1 = false;
             MouseX2 = false;
             RunAtStartup = false;
+            TopmostHotkey = new HotkeyConfig(0x0003, 0x50);
+            OpacityDownHotkey = new HotkeyConfig(0x0003, 0x28);
+            OpacityUpHotkey = new HotkeyConfig(0x0003, 0x26);
+            OpacityRestoreHotkey = new HotkeyConfig(0x0003, 0x52);
+            SettingsHotkey = new HotkeyConfig(0x0006, 0x39);
         }
 
         [DataMember]
@@ -61,6 +66,21 @@ namespace BossKey
 
         [DataMember]
         public bool RunAtStartup { get; set; }
+
+        [DataMember]
+        public HotkeyConfig TopmostHotkey { get; set; }
+
+        [DataMember]
+        public HotkeyConfig OpacityDownHotkey { get; set; }
+
+        [DataMember]
+        public HotkeyConfig OpacityUpHotkey { get; set; }
+
+        [DataMember]
+        public HotkeyConfig OpacityRestoreHotkey { get; set; }
+
+        [DataMember]
+        public HotkeyConfig SettingsHotkey { get; set; }
     }
 
     internal static class ConfigStore
@@ -88,7 +108,40 @@ namespace BossKey
                 using (var stream = File.OpenRead(ConfigPath))
                 {
                     var serializer = new DataContractJsonSerializer(typeof(AppConfig));
-                    return serializer.ReadObject(stream) as AppConfig ?? new AppConfig();
+                    var loaded = serializer.ReadObject(stream) as AppConfig ?? new AppConfig();
+                    if (loaded.TargetExePaths == null)
+                    {
+                        loaded.TargetExePaths = new List<string>();
+                    }
+                    if (loaded.HideHotkey == null)
+                    {
+                        loaded.HideHotkey = new HotkeyConfig(0x0002, 0xC0);
+                    }
+                    if (loaded.ShowHotkey == null)
+                    {
+                        loaded.ShowHotkey = new HotkeyConfig(0x0006, 0xC0);
+                    }
+                    if (loaded.TopmostHotkey == null)
+                    {
+                        loaded.TopmostHotkey = new HotkeyConfig(0x0003, 0x50);
+                    }
+                    if (loaded.OpacityDownHotkey == null)
+                    {
+                        loaded.OpacityDownHotkey = new HotkeyConfig(0x0003, 0x28);
+                    }
+                    if (loaded.OpacityUpHotkey == null)
+                    {
+                        loaded.OpacityUpHotkey = new HotkeyConfig(0x0003, 0x26);
+                    }
+                    if (loaded.OpacityRestoreHotkey == null)
+                    {
+                        loaded.OpacityRestoreHotkey = new HotkeyConfig(0x0003, 0x52);
+                    }
+                    if (loaded.SettingsHotkey == null)
+                    {
+                        loaded.SettingsHotkey = new HotkeyConfig(0x0006, 0x39);
+                    }
+                    return loaded;
                 }
             }
             catch
@@ -115,6 +168,27 @@ namespace BossKey
             }
 
             return Path.GetFullPath(path).Trim().ToLowerInvariant();
+        }
+
+        public static bool IsProtectedExe(string exePath)
+        {
+            if (string.IsNullOrWhiteSpace(exePath))
+            {
+                return false;
+            }
+
+            var name = Path.GetFileName(exePath);
+            return string.Equals(name, "explorer.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "dwm.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "winlogon.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "csrss.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "sihost.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "searchhost.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "startmenuexperiencehost.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "shellexperiencehost.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "textinputhost.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "runtimebroker.exe", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "taskmgr.exe", StringComparison.OrdinalIgnoreCase);
         }
 
         public static string GetDisplayName(string exePath)

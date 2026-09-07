@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -8,15 +10,79 @@ namespace BossKey
     internal static class Program
     {
         private static Mutex _mutex;
+        public static readonly uint ShowSettingsMessage = 0x8007;
 
         [STAThread]
         private static void Main()
+        {
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) => LogFatal(e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                LogFatal(e.ExceptionObject as Exception ?? new Exception(Convert.ToString(e.ExceptionObject)));
+            };
+
+            try
+            {
+                RunApp();
+            }
+            catch (Exception ex)
+            {
+                LogFatal(ex);
+            }
+        }
+
+        private static void LogFatal(Exception ex)
+        {
+            try
+            {
+                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "boss-key");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, "crash.log"), DateTime.Now + Environment.NewLine + (ex == null ? "unknown" : ex.ToString()));
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                MessageBox.Show(ex == null ? "未知错误" : ex.ToString(), "boss-key 启动失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch
+            {
+            }
+        }
+
+        private static void RunApp()
         {
             bool createdNew;
             _mutex = new Mutex(true, "Global\\BossKey_SingleInstance", out createdNew);
             if (!createdNew)
             {
-                MessageBox.Show("boss-key 已经在运行。", "boss-key", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                var existing = WinApi.FindWindow(null, PumpForm.WindowTitle);
+                if (existing == IntPtr.Zero)
+                {
+                    try
+                    {
+                        var hwndPath = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                            "boss-key",
+                            "hwnd.txt");
+                        long raw;
+                        if (File.Exists(hwndPath) && long.TryParse(File.ReadAllText(hwndPath).Trim(), out raw) && raw != 0)
+                        {
+                            existing = new IntPtr(raw);
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (existing != IntPtr.Zero)
+                {
+                    WinApi.PostMessage(existing, ShowSettingsMessage, IntPtr.Zero, IntPtr.Zero);
+                }
                 return;
             }
 
@@ -24,64 +90,145 @@ namespace BossKey
             Application.SetCompatibleTextRenderingDefault(false);
 
             var config = ConfigStore.Load();
+            if (config.TargetExePaths == null)
+            {
+                config.TargetExePaths = new List<string>();
+            }
+
             var hideService = new HideService();
             hideService.UpdateTargets(config.TargetExePaths);
+            hideService.RestoreLeftovers();
+            hideService.HideLeakedHelpers();
 
-            MainForm mainForm = null;
-            InputHooks inputHooks = null;
-
-            mainForm = new MainForm(hideService, config);
-            mainForm.ShowInTaskbar = false;
-            mainForm.CreateHandle();
-            inputHooks = new InputHooks(mainForm, hideService, () => mainForm.IsVisibleToUser());
+            var windowFx = new WindowFx();
+            windowFx.RepairDamagedSurfaces();
+            var pump = new PumpForm();
+            var mainForm = new MainForm(hideService, windowFx, config);
+            var inputHooks = new InputHooks(pump, hideService, () => mainForm.IsVisibleToUser());
             mainForm.AttachInputHooks(inputHooks);
+            pump.Hooks = inputHooks;
+            pump.ShowSettings = mainForm.ToggleSettings;
+
             inputHooks.HideRequested += hideService.HideAll;
             inputHooks.ShowRequested += hideService.ShowAll;
+            inputHooks.TopmostRequested += () => mainForm.SetStatus(windowFx.ToggleTopmost());
+            inputHooks.OpacityDownRequested += () => mainForm.SetStatus(windowFx.AdjustOpacity(-25));
+            inputHooks.OpacityUpRequested += () => mainForm.SetStatus(windowFx.AdjustOpacity(25));
+            inputHooks.OpacityRestoreRequested += () => mainForm.SetStatus(windowFx.RestoreOpacity());
+            inputHooks.SettingsRequested += mainForm.ToggleSettings;
 
-            var tray = new TrayContext(mainForm, hideService, inputHooks);
-            Application.Run(tray);
+            var context = new AppContext(pump, mainForm, hideService, inputHooks, windowFx);
+            Application.Run(context);
         }
     }
 
-    internal sealed class TrayContext : ApplicationContext
+    internal sealed class PumpForm : Form
     {
-        private readonly NotifyIcon _notifyIcon;
-        private readonly MainForm _mainForm;
+        public const string WindowTitle = "BossKeyPump";
+
+        public InputHooks Hooks;
+        public Action ShowSettings;
+
+        public PumpForm()
+        {
+            Text = WindowTitle;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-32000, -32000);
+            Size = new Size(1, 1);
+            Opacity = 1;
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= WinApi.WS_EX_TOOLWINDOW | WinApi.WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            try
+            {
+                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "boss-key");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, "hwnd.txt"), Handle.ToInt64().ToString());
+            }
+            catch
+            {
+            }
+
+            if (Hooks != null)
+            {
+                Hooks.Rebind();
+            }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == (int)Program.ShowSettingsMessage)
+            {
+                if (ShowSettings != null)
+                {
+                    ShowSettings();
+                }
+                return;
+            }
+
+            if (Hooks != null && Hooks.ProcessHotkeyMessage(m))
+            {
+                return;
+            }
+
+            base.WndProc(ref m);
+        }
+    }
+
+    internal sealed class AppContext : ApplicationContext
+    {
         private readonly HideService _hideService;
         private readonly InputHooks _inputHooks;
+        private readonly WindowFx _windowFx;
+        private readonly MainForm _mainForm;
+        private bool _exiting;
 
-        public TrayContext(MainForm mainForm, HideService hideService, InputHooks inputHooks)
+        public AppContext(PumpForm pump, MainForm mainForm, HideService hideService, InputHooks inputHooks, WindowFx windowFx)
         {
             _mainForm = mainForm;
             _hideService = hideService;
             _inputHooks = inputHooks;
-
-            _notifyIcon = new NotifyIcon
-            {
-                Icon = SystemIcons.Application,
-                Text = "boss-key",
-                Visible = true
-            };
-
-            var menu = new ContextMenuStrip();
-            menu.Items.Add("打开设置", null, (s, e) => _mainForm.ShowFromTray());
-            menu.Items.Add("立即隐藏", null, (s, e) => _hideService.HideAll());
-            menu.Items.Add("立即显示", null, (s, e) => _hideService.ShowAll());
-            menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("退出", null, (s, e) => ExitApplication());
-
-            _notifyIcon.ContextMenuStrip = menu;
-            _notifyIcon.DoubleClick += (s, e) => _mainForm.ShowFromTray();
-
-            _mainForm.FormClosed += (s, e) => ExitApplication();
+            _windowFx = windowFx;
+            MainForm = pump;
+            _mainForm.ExitRequested += ExitApplication;
         }
 
         private void ExitApplication()
         {
-            _notifyIcon.Visible = false;
+            if (_exiting)
+            {
+                return;
+            }
+
+            _exiting = true;
             _inputHooks.Dispose();
+            _windowFx.RestoreAll();
+            _hideService.ShowAll();
             _hideService.Dispose();
-            _mainForm.Close();
+            _mainForm.CloseForExit();
+            if (MainForm != null)
+            {
+                MainForm.Close();
+            }
             ExitThread();
         }
     }
