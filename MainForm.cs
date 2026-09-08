@@ -289,7 +289,7 @@ namespace BossKey
             };
 
             card.Controls.Add(MakeMuted("其他", new Point(16, 10)));
-            card.Controls.Add(MakeHint("远程/游戏里请用键盘热键隐藏（按着 Shift 也行）。显示只能用键盘。", new Point(60, 10)));
+            card.Controls.Add(MakeHint("侧键需在设置里勾选并保存。远程/游戏里侧键可能无效，请用键盘热键。", new Point(60, 10)));
             _mouseMiddleBox = CreateCheckBox("鼠标中键隐藏", new Point(16, 36), _config.MouseMiddle);
             _mouseMiddleBox.Name = "mouseMiddle";
             _mouseX1Box = CreateCheckBox("侧键1 隐藏", new Point(160, 36), _config.MouseX1);

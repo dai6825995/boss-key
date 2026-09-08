@@ -72,7 +72,10 @@ namespace BossKey
             _config = config ?? new AppConfig();
             UnregisterHotkeys();
             RegisterHotkeys();
-            _rawInput.Attach(_messageWindow, _config);
+            if (_messageWindow != null && _messageWindow.IsHandleCreated)
+            {
+                _rawInput.Attach(_messageWindow, _config);
+            }
         }
 
         public void Rebind()
@@ -198,7 +201,6 @@ namespace BossKey
             if (_hookPumpWnd != IntPtr.Zero)
             {
                 WinApi.SetTimer(_hookPumpWnd, new UIntPtr(1), 2500, IntPtr.Zero);
-                _rawInput.AttachHandle(_hookPumpWnd, _config);
             }
 
             WinApi.MSG msg;
@@ -478,20 +480,26 @@ namespace BossKey
                             return (IntPtr)1;
                         }
 
-                        if (message == WinApi.WM_XBUTTONDOWN)
+                        if (message == WinApi.WM_XBUTTONDOWN || message == WinApi.WM_XBUTTONUP)
                         {
                             var hookStruct = (WinApi.MSLLHOOKSTRUCT)System.Runtime.InteropServices.Marshal.PtrToStructure(
                                 lParam,
                                 typeof(WinApi.MSLLHOOKSTRUCT));
-                            var button = hookStruct.mouseData >> 16;
+                            var button = (hookStruct.mouseData >> 16) & 0xFFFF;
                             if (_config.MouseX1 && button == WinApi.XBUTTON1)
                             {
-                                PostHide();
+                                if (message == WinApi.WM_XBUTTONDOWN)
+                                {
+                                    PostHide();
+                                }
                                 return (IntPtr)1;
                             }
                             if (_config.MouseX2 && button == WinApi.XBUTTON2)
                             {
-                                PostHide();
+                                if (message == WinApi.WM_XBUTTONDOWN)
+                                {
+                                    PostHide();
+                                }
                                 return (IntPtr)1;
                             }
                         }

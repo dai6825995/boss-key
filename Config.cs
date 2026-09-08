@@ -36,8 +36,8 @@ namespace BossKey
             HideHotkey = new HotkeyConfig(0x0002, 0xC0);
             ShowHotkey = new HotkeyConfig(0x0006, 0xC0);
             MouseMiddle = true;
-            MouseX1 = false;
-            MouseX2 = false;
+            MouseX1 = true;
+            MouseX2 = true;
             RunAtStartup = false;
             TopmostHotkey = new HotkeyConfig(0x0003, 0x50);
             OpacityDownHotkey = new HotkeyConfig(0x0003, 0x28);

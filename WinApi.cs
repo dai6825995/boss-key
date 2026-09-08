@@ -37,6 +37,7 @@ namespace BossKey
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
         public const int WM_MOUSEWHEEL = 0x020A;
         public const int WM_XBUTTONDOWN = 0x020B;
+        public const int WM_XBUTTONUP = 0x020C;
         public const int WM_MBUTTONDOWN = 0x0207;
         public const int XBUTTON1 = 0x0001;
         public const int XBUTTON2 = 0x0002;
